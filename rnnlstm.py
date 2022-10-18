@@ -7,7 +7,7 @@ from torch.nn import Parameter
 from torch import Tensor
 import torch.nn.functional as F
 import math
-
+import argparse
 '''
 STEP 1: LOADING DATASET
 '''
@@ -32,7 +32,8 @@ train_loader = torch.utils.data.DataLoader(dataset=train_dataset,
 test_loader = torch.utils.data.DataLoader(dataset=test_dataset,
                                           batch_size=batch_size,
                                           shuffle=False)
-
+parser = argparse.ArgumentParser(description="Neural Networks")
+config = parser.parse_args()
 class CNN_LSTM(nn.Module):
 
     def __init__(self, args):
