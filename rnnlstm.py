@@ -109,7 +109,7 @@ hidden_dim = 128
 layer_dim = 1  # ONLY CHANGE IS HERE FROM ONE LAYER TO TWO LAYER
 output_dim = 10
 
-model = CNN_LSTM(input_dim, hidden_dim, layer_dim, output_dim)
+model = CNN_LSTM()
 # model = GRUModel(input_dim, hidden_dim, layer_dim, output_dim)
 
 #######################
