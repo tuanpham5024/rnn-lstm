@@ -5,7 +5,7 @@ import torchvision.datasets as dsets
 from torch.autograd import Variable
 from torch.nn import Parameter
 from torch import Tensor
-
+import torch.nn.functional as F
 import math
 
 '''
@@ -33,105 +33,73 @@ test_loader = torch.utils.data.DataLoader(dataset=test_dataset,
                                           batch_size=batch_size,
                                           shuffle=False)
 
+class CNN_LSTM(nn.Module):
 
-class LSTMCell(nn.Module):
-    """
-    An implementation of Hochreiter & Schmidhuber:
-    'Long-Short Term Memory' cell.
-    http://www.bioinf.jku.at/publications/older/2604.pdf
+    def __init__(self, args):
+        super(CNN_LSTM, self).__init__()
+        self.args = args
+        self.hidden_dim = args.lstm_hidden_dim
+        self.num_layers = args.lstm_num_layers
+        V = args.embed_num
+        D = args.embed_dim
+        C = args.class_num
+        Ci = 1
+        Co = args.kernel_num
+        Ks = args.kernel_sizes
+        self.C = C
+        self.embed = nn.Embedding(V, D, padding_idx=args.paddingId)
+        # pretrained  embedding
+        if args.word_Embedding:
+            self.embed.weight.data.copy_(args.pretrained_weight)
 
-    """
+        # CNN
+        self.convs1 = [nn.Conv2d(Ci, Co, (K, D)) for K in Ks]
+        self.dropout = nn.Dropout(args.dropout)
+        # for cnn cuda
+        if self.args.cuda is True:
+            for conv in self.convs1:
+                conv = conv.cuda()
 
-    def __init__(self, input_size, hidden_size, bias=True):
-        super(LSTMCell, self).__init__()
-        self.input_size = input_size
-        self.hidden_size = hidden_size
-        self.bias = bias
-        self.x2h = nn.Linear(input_size, 4 * hidden_size, bias=bias)
-        self.h2h = nn.Linear(hidden_size, 4 * hidden_size, bias=bias)
-        self.reset_parameters()
+        # LSTM
+        self.lstm = nn.LSTM(D, self.hidden_dim, dropout=args.dropout, num_layers=self.num_layers)
 
-    def reset_parameters(self):
-        std = 1.0 / math.sqrt(self.hidden_size)
-        for w in self.parameters():
-            w.data.uniform_(-std, std)
-
-    def forward(self, x, hidden):
-        hx, cx = hidden
-
-        x = x.view(-1, x.size(1))
-
-        gates = self.x2h(x) + self.h2h(hx)
-
-        gates = gates.squeeze()
-
-        ingate, forgetgate, cellgate, outgate = gates.chunk(4, 1)
-
-        resetgate = torch.sigmoid(ingate + cellgate)
-        newgate = torch.tanh(ingate + (resetgate * forgetgate))
-        ingate = torch.sigmoid(ingate)
-        forgetgate = torch.sigmoid(forgetgate)
-        cellgate = torch.tanh(cellgate)
-        outgate = torch.sigmoid(outgate)
-
-        cy = torch.mul(cx, forgetgate) + torch.mul(ingate, cellgate)
-
-        hy = newgate + torch.mul(outgate, torch.tanh(cy))
-
-        return (hy, cy)
-
-
-'''
-STEP 3: CREATE MODEL CLASS
-'''
-
-
-class LSTMModel(nn.Module):
-    def __init__(self, input_dim, hidden_dim, layer_dim, output_dim, bias=True):
-        super(LSTMModel, self).__init__()
-        # Hidden dimensions
-        self.hidden_dim = hidden_dim
-
-        # Number of hidden layers
-        self.layer_dim = layer_dim
-
-        self.lstm = LSTMCell(input_dim, hidden_dim, layer_dim)
-
-        self.fc = nn.Linear(hidden_dim, output_dim)
+        # linear
+        L = len(Ks) * Co + self.hidden_dim
+        self.hidden2label1 = nn.Linear(L, L // 2)
+        self.hidden2label2 = nn.Linear(L // 2, C)
 
     def forward(self, x):
+        embed = self.embed(x)
 
-        # Initialize hidden state with zeros
-        #######################
-        #  USE GPU FOR MODEL  #
-        #######################
-        # print(x.shape,"x.shape")100, 28, 28
-        if torch.cuda.is_available():
-            h0 = Variable(torch.zeros(self.layer_dim, x.size(0), self.hidden_dim).cuda())
-        else:
-            h0 = Variable(torch.zeros(self.layer_dim, x.size(0), self.hidden_dim))
+        # CNN
+        cnn_x = embed
+        cnn_x = torch.transpose(cnn_x, 0, 1)
+        cnn_x = cnn_x.unsqueeze(1)
+        cnn_x = [F.relu(conv(cnn_x)).squeeze(3) for conv in self.convs1]  # [(N,Co,W), ...]*len(Ks)
+        cnn_x = [F.max_pool1d(i, i.size(2)).squeeze(2) for i in cnn_x]  # [(N,Co), ...]*len(Ks)
+        cnn_x = torch.cat(cnn_x, 1)
+        cnn_x = self.dropout(cnn_x)
 
-        # Initialize cell state
-        if torch.cuda.is_available():
-            c0 = Variable(torch.zeros(self.layer_dim, x.size(0), self.hidden_dim).cuda())
-        else:
-            c0 = Variable(torch.zeros(self.layer_dim, x.size(0), hidden_dim))
+        # LSTM
+        lstm_x = embed.view(len(x), embed.size(1), -1)
+        lstm_out, _ = self.lstm(lstm_x)
+        lstm_out = torch.transpose(lstm_out, 0, 1)
+        lstm_out = torch.transpose(lstm_out, 1, 2)
+        lstm_out = F.max_pool1d(lstm_out, lstm_out.size(2)).squeeze(2)
 
-        outs = []
+        # CNN and LSTM cat
+        cnn_x = torch.transpose(cnn_x, 0, 1)
+        lstm_out = torch.transpose(lstm_out, 0, 1)
+        cnn_lstm_out = torch.cat((cnn_x, lstm_out), 0)
+        cnn_lstm_out = torch.transpose(cnn_lstm_out, 0, 1)
 
-        cn = c0[0, :, :]
-        hn = h0[0, :, :]
+        # linear
+        cnn_lstm_out = self.hidden2label1(F.tanh(cnn_lstm_out))
+        cnn_lstm_out = self.hidden2label2(F.tanh(cnn_lstm_out))
 
-        for seq in range(x.size(1)):
-            hn, cn = self.lstm(x[:, seq, :], (hn, cn))
-            outs.append(hn)
-
-        out = outs[-1].squeeze()
-
-        out = self.fc(out)
-        # out.size() --> 100, 10
-        return out
-
+        # output
+        logit = cnn_lstm_out
+        return
 
 '''
 STEP 4: INSTANTIATE MODEL CLASS
@@ -141,7 +109,7 @@ hidden_dim = 128
 layer_dim = 1  # ONLY CHANGE IS HERE FROM ONE LAYER TO TWO LAYER
 output_dim = 10
 
-model = LSTMModel(input_dim, hidden_dim, layer_dim, output_dim)
+model = CNN_LSTM(input_dim, hidden_dim, layer_dim, output_dim)
 # model = GRUModel(input_dim, hidden_dim, layer_dim, output_dim)
 
 #######################
